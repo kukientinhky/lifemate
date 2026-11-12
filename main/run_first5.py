@@ -1,7 +1,7 @@
-"""Chạy thử GPT-5 trên N mẫu đầu tiên (mặc định 5), không chạy cả split.
+"""Chạy thử OpenRouter trên N mẫu đầu tiên (mặc định 5), không chạy cả split.
 
 Ví dụ (chạy từ thư mục gốc repo):
-    export OPENAI_API_KEY='...'
+    export OPENROUTER_API_KEY='...'
     # train có sẵn audio_text và label nên so sánh được tên tool:
     python main/run_first5.py --split train
     # public_test cần transcript ASR (tạo bằng main/asr.py):
@@ -15,8 +15,8 @@ import json
 import os
 from pathlib import Path
 
-from agent import attach_asr_transcripts, catalog_by_name, import_tool_env, infer, read_jsonl
-from openai_gpt5 import DEFAULT_MODEL, load_project_env
+from agent import DEFAULT_MODEL, attach_asr_transcripts, catalog_by_name, import_tool_env, infer, read_jsonl
+from openrouter_test import load_project_env
 
 
 def expected_state_hash(item: dict, root: Path, split: str) -> str:
@@ -29,7 +29,7 @@ def expected_state_hash(item: dict, root: Path, split: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Test GPT-5 agent on the first N samples")
+    parser = argparse.ArgumentParser(description="Test OpenRouter agent on the first N samples")
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--split", choices=("train", "public_test"), default="train")
     parser.add_argument("--n", type=int, default=5, help="số mẫu đầu tiên (mặc định 5)")
@@ -39,9 +39,9 @@ def main() -> None:
     args = parser.parse_args()
 
     load_project_env()
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        raise SystemExit("OPENAI_API_KEY is missing. Set it in the environment or the gitignored .env file.")
+        raise SystemExit("OPENROUTER_API_KEY is missing. Set it in the environment or the gitignored .env file.")
 
     split_dir = args.root / args.split
     records = read_jsonl(split_dir / f"{args.split}.jsonl")[: args.n]

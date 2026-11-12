@@ -1,6 +1,6 @@
-"""Development agent: transcript -> OpenAI GPT-5 -> zaic_tools calls.
+"""Development agent: transcript -> OpenRouter -> zaic_tools calls.
 
-This script is for prompt and behavior development only. It calls the OpenAI API,
+This script is for prompt and behavior development only. It calls the OpenRouter API,
 which is prohibited in the final offline Docker submission. It never reads a
 file under ``<split>_environment`` and uses only ToolEnv's allowed API.
 
@@ -11,7 +11,7 @@ Examples:
     # Produce a development submission from precomputed PhoWhisper transcripts.
     .venv/bin/python main/agent.py --split public_test \
         --transcripts artifacts/public_test_asr_small.jsonl \
-        --output artifacts/gpt5_submission.jsonl
+        --output artifacts/glm_submission.jsonl
 """
 from __future__ import annotations
 
@@ -22,11 +22,14 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from openai_gpt5 import DEFAULT_MODEL, chat, load_project_env
+from openrouter_test import api_request, load_project_env
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from typing import Annotated, Literal
 
 
+DEFAULT_MODEL = "z-ai/glm-5.3-flash"
+MAX_TOKENS = 10_000  # hard cap per call (includes reasoning tokens)
+REASONING_EFFORT = "low"
 MAX_TOOL_STEPS = 8
 MAX_LLM_ROUNDS = 12
 
@@ -136,14 +139,16 @@ def parse_json_reply(content: str) -> dict[str, Any]:
 
 
 def llm_decision(api_key: str, model: str, prompt: str) -> dict[str, Any]:
-    response = chat(
-        api_key,
-        model,
-        prompt,
-        # OpenAI strict json_schema rejects the free-form `arguments` object,
-        # so request plain JSON; DECISION_ADAPTER validates the shape locally.
-        response_format={"type": "json_object"},
-    )
+    response = api_request(api_key, "/chat/completions", {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": MAX_TOKENS,
+        "reasoning": {"effort": REASONING_EFFORT},
+        # Free-form `arguments` is incompatible with strict json_schema, so ask
+        # for plain JSON; DECISION_ADAPTER validates the shape locally.
+        "response_format": {"type": "json_object"},
+    })
     content = response.get("choices", [{}])[0].get("message", {}).get("content")
     if not isinstance(content, str):
         raise ValueError(f"missing text content in LLM response: {response!r}")
@@ -214,7 +219,7 @@ def infer(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Development-only LifeMate GPT-5 agent")
+    parser = argparse.ArgumentParser(description="Development-only LifeMate OpenRouter agent")
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--split", choices=("train", "public_test"), default="train")
     parser.add_argument("--id", help="run one sample and print its prediction")
@@ -225,9 +230,9 @@ def main() -> None:
 
     load_project_env()
     import os
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        raise SystemExit("OPENAI_API_KEY is missing. Put it in the gitignored .env file.")
+        raise SystemExit("OPENROUTER_API_KEY is missing. Put it in the gitignored .env file.")
     if not args.id and not args.output:
         raise SystemExit("provide --id for one sample or --output for a split")
 
