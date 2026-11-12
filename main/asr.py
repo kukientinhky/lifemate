@@ -24,7 +24,7 @@ import wave
 class PhoWhisperTranscriber:
     """Lazy wrapper around the official Hugging Face PhoWhisper checkpoints."""
 
-    def __init__(self, model_id: str, device: str = "auto") -> None:
+    def __init__(self, model_id: str, device: str = "auto", adapter: Path | None = None) -> None:
         try:
             import torch
             from transformers import pipeline
@@ -35,18 +35,48 @@ class PhoWhisperTranscriber:
             ) from exc
 
         if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        if device not in {"cpu", "cuda"}:
-            raise ValueError("device must be one of: auto, cpu, cuda")
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+        if device not in {"cpu", "cuda", "mps"}:
+            raise ValueError("device must be one of: auto, cpu, cuda, mps")
         if device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("--device cuda was requested but CUDA is unavailable")
+        if device == "mps" and not torch.backends.mps.is_available():
+            raise RuntimeError("--device mps was requested but MPS is unavailable")
+        dtype = torch.float16 if device in {"cuda", "mps"} else torch.float32
+        self._has_adapter = adapter is not None
 
-        # Transformers pipeline uses an integer device index: -1 means CPU.
+        if adapter is None:
+            # Transformers pipeline uses an integer device index: -1 means CPU.
+            self._pipe = pipeline(
+                "automatic-speech-recognition",
+                model=model_id,
+                device={"cuda": 0, "mps": "mps", "cpu": -1}[device],
+                torch_dtype=dtype,
+            )
+            return
+
+        # Fine-tuned LoRA adapter on top of the base PhoWhisper checkpoint.
+        try:
+            from peft import PeftModel
+            from transformers import WhisperForConditionalGeneration, WhisperProcessor
+        except ImportError as exc:
+            raise SystemExit("Using --adapter requires `pip install peft`.") from exc
+        model = WhisperForConditionalGeneration.from_pretrained(model_id, torch_dtype=dtype)
+        model = PeftModel.from_pretrained(model, str(adapter)).merge_and_unload()
+        processor = WhisperProcessor.from_pretrained(model_id)
         self._pipe = pipeline(
             "automatic-speech-recognition",
-            model=model_id,
-            device=0 if device == "cuda" else -1,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            model=model.to(device),
+            tokenizer=processor.tokenizer,
+            feature_extractor=processor.feature_extractor,
+            device=device,
+            torch_dtype=dtype,
+            chunk_length_s=30,
         )
 
     def transcribe(self, audio_path: Path) -> str:
@@ -127,7 +157,8 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path("."), help="repository/data root")
     parser.add_argument("--split", choices=("train", "public_test"), default="public_test")
     parser.add_argument("--model", default="vinai/PhoWhisper-large", help="Hugging Face PhoWhisper model ID")
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
+    parser.add_argument("--adapter", type=Path, help="LoRA adapter dir (e.g. ../phowhisper-test/final)")
     parser.add_argument("--output", type=Path, required=True, help="ASR JSONL destination")
     parser.add_argument("--include-history", action="store_true", help="also transcribe user turns in history")
     parser.add_argument("--limit", type=int, help="number of samples to process (useful for a smoke test)")
@@ -139,7 +170,7 @@ def main() -> None:
         raise SystemExit(f"Dataset not found: {input_path}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    transcriber = PhoWhisperTranscriber(args.model, args.device)
+    transcriber = PhoWhisperTranscriber(args.model, args.device, args.adapter)
 
     count = 0
     with args.output.open("w", encoding="utf-8") as output:

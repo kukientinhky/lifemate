@@ -59,7 +59,8 @@ def main() -> None:
     parser.add_argument("--id", help="run one specific sample")
     parser.add_argument("--limit", type=int, help="maximum number of selected samples")
     parser.add_argument("--asr-model", default="vinai/PhoWhisper-large")
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
+    parser.add_argument("--adapter", type=Path, help="LoRA adapter dir for PhoWhisper")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="development OpenAI model")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--asr-output", type=Path, help="write PhoWhisper transcripts alongside submission output")
@@ -85,7 +86,7 @@ def main() -> None:
     catalog = catalog_by_name(split_dir / f"{args.split}_tools_catalog.json")
 
     # Expensive initialization happens once, before the per-ID timer begins.
-    transcriber = PhoWhisperTranscriber(args.asr_model, args.device)
+    transcriber = PhoWhisperTranscriber(args.asr_model, args.device, args.adapter)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.asr_output:
         args.asr_output.parent.mkdir(parents=True, exist_ok=True)
