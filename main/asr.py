@@ -126,7 +126,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Transcribe LifeMate audio with PhoWhisper")
     parser.add_argument("--root", type=Path, default=Path("."), help="repository/data root")
     parser.add_argument("--split", choices=("train", "public_test"), default="public_test")
-    parser.add_argument("--model", default="vinai/PhoWhisper-small", help="Hugging Face PhoWhisper model ID")
+    parser.add_argument("--model", default="vinai/PhoWhisper-large", help="Hugging Face PhoWhisper model ID")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--output", type=Path, required=True, help="ASR JSONL destination")
     parser.add_argument("--include-history", action="store_true", help="also transcribe user turns in history")

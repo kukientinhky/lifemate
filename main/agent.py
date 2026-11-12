@@ -208,9 +208,16 @@ def infer(
         trace.append({"tool_call": decision, "tool_result": result})
         tool_steps += 1
         if tool_steps >= MAX_TOOL_STEPS:
-            raise RuntimeError(f"agent exceeded {MAX_TOOL_STEPS} tool calls for {item['id']}")
+            print(
+                f"warning: {item['id']} reached the {MAX_TOOL_STEPS}-tool safety cap; submitting completed calls",
+                file=sys.stderr,
+            )
+            break
     else:
-        raise RuntimeError(f"agent exceeded {MAX_LLM_ROUNDS} LLM planning rounds for {item['id']}")
+        print(
+            f"warning: {item['id']} reached the {MAX_LLM_ROUNDS}-round planning cap; submitting completed calls",
+            file=sys.stderr,
+        )
 
     return env.get_tool_calls(), env.get_state_hash()
 
