@@ -95,18 +95,24 @@ def main() -> None:
     asr_stream = args.asr_output.open(mode, encoding="utf-8") if args.asr_output else None
     try:
         with args.output.open(mode, encoding="utf-8") as output:
+            failed: list[str] = []
             for index, item in enumerate(selected, start=1):
                 started = time.monotonic()
-                enriched = add_transcripts(item, split_dir, transcriber)
-                calls, state_hash = infer(
-                    enriched,
-                    enriched["audio_text"],
-                    args.root,
-                    args.split,
-                    catalog,
-                    api_key,
-                    args.model,
-                )
+                try:
+                    enriched = add_transcripts(item, split_dir, transcriber)
+                    calls, state_hash = infer(
+                        enriched,
+                        enriched["audio_text"],
+                        args.root,
+                        args.split,
+                        catalog,
+                        api_key,
+                        args.model,
+                    )
+                except Exception as error:  # one bad sample must not stop a full run
+                    failed.append(item["id"])
+                    print(f"[{index}/{len(selected)}] {item['id']} FAILED: {error}", flush=True)
+                    continue  # no row written, so --resume retries it
                 row = {"id": enriched["id"], "tool_calls": calls, "state_hash": state_hash}
                 output.write(json.dumps(row, ensure_ascii=False) + "\n")
                 output.flush()  # preserve every completed ID even if a later one fails
@@ -116,6 +122,8 @@ def main() -> None:
                 elapsed = time.monotonic() - started
                 print(f"[{index}/{len(selected)}] {enriched['id']} completed in {elapsed:.2f}s", flush=True)
                 print(json.dumps(row, ensure_ascii=False), flush=True)
+            if failed:
+                print(f"\n{len(failed)} sample(s) failed: {failed}\nRe-run the same command with --resume to retry them.", flush=True)
     finally:
         if asr_stream:
             asr_stream.close()

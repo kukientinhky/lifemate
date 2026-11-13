@@ -106,7 +106,7 @@ def decision_prompt(
     context.pop("installed_apps", None)  # represented precisely by `tools`
     return """Bạn là bộ lập kế hoạch tool cho LifeMate. Hãy thực hiện yêu cầu tiếng Việt bằng cách chọn TỐI ĐA MỘT tool call ở mỗi lượt.
 
-Chỉ được gọi tool trong TOOL_SCHEMAS. Tuân thủ chính xác JSON Schema. Khi cần ID thiết bị, contact, hóa đơn, đơn hàng hoặc dữ liệu app, hãy gọi tool read phù hợp trước; không được đoán ID. Dùng context để suy luận ngày giờ, nhà/công ty và vị trí ("mai" là ngày dương lịch ngay sau current_time). Chỉ truyền tham số optional khi người dùng yêu cầu rõ hoặc nó cần để phân biệt đối tượng; hãy để tool dùng default nếu có. Nếu thiếu tham số bắt buộc không thể suy ra hoặc tra cứu được, gọi sys.ask_missing_info với tool_name và params. Nếu yêu cầu không có app hỗ trợ, hoặc các thao tác đã hoàn tất, chọn done.
+Chỉ được gọi tool trong TOOL_SCHEMAS. Tuân thủ chính xác JSON Schema. Khi cần ID thiết bị, contact, hóa đơn, đơn hàng hoặc dữ liệu app, hãy gọi tool read phù hợp trước; không được đoán ID. Dùng context để suy luận ngày giờ, nhà/công ty và vị trí ("mai" là ngày dương lịch ngay sau current_time). Chỉ truyền tham số optional khi người dùng yêu cầu rõ hoặc nó cần để phân biệt đối tượng; hãy để tool dùng default nếu có. Nếu thiếu tham số bắt buộc không thể suy ra hoặc tra cứu được, gọi sys.ask_missing_info với tool_name và params MỘT LẦN DUY NHẤT rồi dừng (không gọi thêm tool nào sau đó). Nếu yêu cầu không có app hỗ trợ, hoặc các thao tác đã hoàn tất, chọn done.
 
 Hành động bảo thủ: chỉ gọi write tool khi người dùng yêu cầu rõ ràng. Không tự tạo alarm/reminder/event, đặt xe/đơn hàng, gửi tin, chuyển tiền hay thay đổi app để "giúp" một yêu cầu chỉ đọc thông tin. Khi người dùng nói tự đính chính như "à mà thôi", "không, chỉ..." hoặc "cứ để", phần cuối cùng có hiệu lực và các hành động trước đó bị hủy.
 
@@ -203,6 +203,8 @@ def infer(
         result = env.call(decision["name"], decision["arguments"])
         trace.append({"tool_call": decision, "tool_result": result})
         tool_steps += 1
+        if decision["name"] == "sys.ask_missing_info":
+            break  # asking the user ends the turn; labels never continue after it
         if tool_steps >= MAX_TOOL_STEPS:
             print(
                 f"warning: {item['id']} reached the {MAX_TOOL_STEPS}-tool safety cap; submitting completed calls",
