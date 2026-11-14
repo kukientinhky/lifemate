@@ -1,7 +1,6 @@
-"""Development agent: transcript -> OpenRouter -> zaic_tools calls.
+"""Agent: transcript -> local Qwen3.5-4B -> zaic_tools calls.
 
-This script is for prompt and behavior development only. It calls the OpenRouter API,
-which is prohibited in the final offline Docker submission. It never reads a
+The LLM runs locally (no API), so it is usable offline. It never reads a
 file under ``<split>_environment`` and uses only ToolEnv's allowed API.
 
 Examples:
@@ -11,7 +10,7 @@ Examples:
     # Produce a development submission from precomputed PhoWhisper transcripts.
     .venv/bin/python main/agent.py --split public_test \
         --transcripts artifacts/public_test_asr_small.jsonl \
-        --output artifacts/glm_submission.jsonl
+        --output artifacts/qwen35_submission.jsonl
 """
 from __future__ import annotations
 
@@ -22,14 +21,12 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from openrouter_test import api_request, load_project_env
+import qwen_local
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from typing import Annotated, Literal
 
 
-DEFAULT_MODEL = "z-ai/glm-5.3-flash"
-MAX_TOKENS = 10_000  # hard cap per call (includes reasoning tokens)
-REASONING_EFFORT = "low"
+DEFAULT_MODEL = qwen_local.MODEL_ID  # Qwen/Qwen3.5-4B, local weights
 MAX_TOOL_STEPS = 8
 MAX_LLM_ROUNDS = 12
 
@@ -89,14 +86,57 @@ def allowed_tool_specs(item: dict[str, Any], catalog: dict[str, dict[str, Any]])
 
 def conversation_summary(item: dict[str, Any]) -> list[dict[str, str]]:
     """Use only prior conversation supplied in the JSONL, never app state."""
-    turns: list[dict[str, str]] = []
+    turns: list[dict[str, Any]] = []
     for turn in item.get("history", []):
         role = turn.get("role")
         if role == "user" and turn.get("audio_text"):
             turns.append({"role": "user", "text": turn["audio_text"]})
         elif role == "assistant" and turn.get("text"):
-            turns.append({"role": "assistant", "text": turn["text"]})
+            entry: dict[str, Any] = {"role": "assistant", "text": turn["text"]}
+            # Keep the tools the assistant already ran (ids, dates) so that
+            # references like "buổi đấy" / "cái vừa rồi" can be resolved.
+            calls, results = turn.get("tool_calls") or [], turn.get("tool_results") or []
+            if calls:
+                entry["tools"] = [
+                    {
+                        "call": {"name": call.get("name"), "arguments": call.get("arguments", {})},
+                        "result": json.dumps(results[i], ensure_ascii=False, separators=(",", ":"))[:600]
+                        if i < len(results)
+                        else None,
+                    }
+                    for i, call in enumerate(calls)
+                ]
+            turns.append(entry)
     return turns[-8:]
+
+
+def time_hints(context: dict[str, Any]) -> dict[str, Any]:
+    """Pre-compute calendar facts so the model never has to do date arithmetic."""
+    from datetime import datetime, timedelta
+
+    try:
+        now = datetime.fromisoformat(context["current_time"])
+    except (KeyError, ValueError):
+        return {}
+    names = ["Thứ hai", "Thứ ba", "Thứ tư", "Thứ năm", "Thứ sáu", "Thứ bảy", "Chủ nhật"]
+    days = {}
+    for offset in range(10):
+        day = now + timedelta(days=offset)
+        label = names[day.weekday()] + {0: " (hôm nay)", 1: " (ngày mai)", 2: " (ngày kia)"}.get(offset, "")
+        days[day.strftime("%Y-%m-%d")] = label
+    return {"gio_hien_tai": now.strftime("%H:%M"), "lich_10_ngay_toi": days}
+
+
+PROMPT_RULES_PATH = Path(__file__).with_name("prompt_rules.txt")
+
+
+def load_prompt_rules() -> str:
+    """Rules/format text that opens every prompt. Edit main/prompt_rules.txt (not this file) to tune it.
+
+    Training data (finetune/build_sft.py) is built from this same text, so after
+    editing it you must rebuild the SFT data and re-train for the change to match.
+    """
+    return PROMPT_RULES_PATH.read_text(encoding="utf-8")
 
 
 def decision_prompt(
@@ -104,22 +144,16 @@ def decision_prompt(
 ) -> str:
     context = dict(item["context"])
     context.pop("installed_apps", None)  # represented precisely by `tools`
-    return """Bạn là bộ lập kế hoạch tool cho LifeMate. Hãy thực hiện yêu cầu tiếng Việt bằng cách chọn TỐI ĐA MỘT tool call ở mỗi lượt.
-
-Chỉ được gọi tool trong TOOL_SCHEMAS. Tuân thủ chính xác JSON Schema. Khi cần ID thiết bị, contact, hóa đơn, đơn hàng hoặc dữ liệu app, hãy gọi tool read phù hợp trước; không được đoán ID. Dùng context để suy luận ngày giờ, nhà/công ty và vị trí ("mai" là ngày dương lịch ngay sau current_time). Chỉ truyền tham số optional khi người dùng yêu cầu rõ hoặc nó cần để phân biệt đối tượng; hãy để tool dùng default nếu có. Nếu thiếu tham số bắt buộc không thể suy ra hoặc tra cứu được, gọi sys.ask_missing_info với tool_name và params MỘT LẦN DUY NHẤT rồi dừng (không gọi thêm tool nào sau đó). Nếu yêu cầu không có app hỗ trợ, hoặc các thao tác đã hoàn tất, chọn done.
-
-Hành động bảo thủ: chỉ gọi write tool khi người dùng yêu cầu rõ ràng. Không tự tạo alarm/reminder/event, đặt xe/đơn hàng, gửi tin, chuyển tiền hay thay đổi app để "giúp" một yêu cầu chỉ đọc thông tin. Khi người dùng nói tự đính chính như "à mà thôi", "không, chỉ..." hoặc "cứ để", phần cuối cùng có hiệu lực và các hành động trước đó bị hủy.
-
-Chỉ trả về JSON hợp lệ, không markdown và không giải thích, đúng một trong hai dạng:
-{"action":"call","name":"app.tool","arguments":{}}
-{"action":"done"}
-
-USER_CONTEXT:
-""" + json.dumps(context, ensure_ascii=False) + "\nCONVERSATION_HISTORY:\n" + json.dumps(
+    context["time_hints"] = time_hints(context)
+    # Static part first (rules + schemas), per-request part last, so the
+    # latest request and trace are the freshest thing the model reads.
+    return load_prompt_rules().rstrip("\n") + "\n\nTOOL_SCHEMAS:\n" + json.dumps(tools, ensure_ascii=False, separators=(",", ":")) + "\n\nUSER_CONTEXT:\n" + json.dumps(
+        context, ensure_ascii=False
+    ) + "\nCONVERSATION_HISTORY:\n" + json.dumps(
         conversation_summary(item), ensure_ascii=False
-    ) + "\nLATEST_REQUEST:\n" + request_text + "\nTOOL_SCHEMAS:\n" + json.dumps(
-        tools, ensure_ascii=False, separators=(",", ":")
-    ) + "\nEXECUTION_TRACE:\n" + json.dumps(trace, ensure_ascii=False, separators=(",", ":"))
+    ) + "\nLATEST_REQUEST:\n" + request_text + "\nEXECUTION_TRACE:\n" + json.dumps(
+        trace, ensure_ascii=False, separators=(",", ":")
+    ) + "\nQUYẾT ĐỊNH TIẾP THEO (JSON):"
 
 
 def parse_json_reply(content: str) -> dict[str, Any]:
@@ -138,21 +172,8 @@ def parse_json_reply(content: str) -> dict[str, Any]:
     return decision.model_dump()
 
 
-def llm_decision(api_key: str, model: str, prompt: str) -> dict[str, Any]:
-    response = api_request(api_key, "/chat/completions", {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": MAX_TOKENS,
-        "reasoning": {"effort": REASONING_EFFORT},
-        # Free-form `arguments` is incompatible with strict json_schema, so ask
-        # for plain JSON; DECISION_ADAPTER validates the shape locally.
-        "response_format": {"type": "json_object"},
-    })
-    content = response.get("choices", [{}])[0].get("message", {}).get("content")
-    if not isinstance(content, str):
-        raise ValueError(f"missing text content in LLM response: {response!r}")
-    return parse_json_reply(content)
+def llm_decision(model: str, prompt: str) -> dict[str, Any]:
+    return parse_json_reply(qwen_local.generate(prompt, model))
 
 
 def import_tool_env(root: Path, split: str):
@@ -178,7 +199,7 @@ def attach_asr_transcripts(records: list[dict[str, Any]], transcript_rows: list[
 
 
 def infer(
-    item: dict[str, Any], request_text: str, root: Path, split: str, catalog: dict[str, dict[str, Any]], api_key: str, model: str
+    item: dict[str, Any], request_text: str, root: Path, split: str, catalog: dict[str, dict[str, Any]], model: str
 ) -> tuple[list[dict[str, Any]], str]:
     ToolEnv = import_tool_env(root, split)
     env = ToolEnv(split, item["id"], root=root)  # exactly one environment per sample
@@ -188,7 +209,7 @@ def infer(
     tool_steps = 0
     for _ in range(MAX_LLM_ROUNDS):
         try:
-            decision = llm_decision(api_key, model, decision_prompt(item, request_text, tools, trace))
+            decision = llm_decision(model, decision_prompt(item, request_text, tools, trace))
         except (ValueError, json.JSONDecodeError) as error:
             trace.append({"response_format_error": str(error)})
             continue
@@ -221,20 +242,16 @@ def infer(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Development-only LifeMate OpenRouter agent")
+    parser = argparse.ArgumentParser(description="LifeMate agent using local Qwen3.5-4B")
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--split", choices=("train", "public_test"), default="train")
     parser.add_argument("--id", help="run one sample and print its prediction")
     parser.add_argument("--transcripts", type=Path, help="ASR JSONL; required for public_test")
     parser.add_argument("--output", type=Path, help="write prediction JSONL when running a split")
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--resume", action="store_true", help="append to --output and skip IDs already in it")
     args = parser.parse_args()
 
-    load_project_env()
-    import os
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise SystemExit("OPENROUTER_API_KEY is missing. Put it in the gitignored .env file.")
     if not args.id and not args.output:
         raise SystemExit("provide --id for one sample or --output for a split")
 
@@ -249,16 +266,27 @@ def main() -> None:
     if args.id and not selected:
         raise SystemExit(f"unknown {args.split} id: {args.id}")
 
-    output_stream = args.output.open("w", encoding="utf-8") if args.output else None
+    if args.resume and args.output and args.output.is_file():
+        done = {row["id"] for row in read_jsonl(args.output) if "id" in row}
+        selected = [item for item in selected if item["id"] not in done]
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+    output_stream = args.output.open("a" if args.resume else "w", encoding="utf-8") if args.output else None
     try:
-        for item in selected:
+        for index, item in enumerate(selected, start=1):
             text = item.get("audio_text")
             if not text:
                 raise RuntimeError(f"no transcript for {item['id']}; pass --transcripts generated by main/asr.py")
-            calls, state_hash = infer(item, text, args.root, args.split, catalog, api_key, args.model)
+            try:
+                calls, state_hash = infer(item, text, args.root, args.split, catalog, args.model)
+            except Exception as error:  # one bad sample must not stop a full run
+                print(f"[{index}/{len(selected)}] {item['id']} FAILED: {error}", file=sys.stderr, flush=True)
+                continue  # no row written, so --resume retries it
             row = {"id": item["id"], "tool_calls": calls, "state_hash": state_hash}
             if output_stream:
                 output_stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+                output_stream.flush()
+                print(f"[{index}/{len(selected)}] {item['id']}: {[c['name'] for c in calls]}", flush=True)
             else:
                 print(json.dumps(row, ensure_ascii=False, indent=2))
     finally:

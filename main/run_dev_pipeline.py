@@ -5,12 +5,11 @@ For every sample this performs, in order:
 
 The ASR model is loaded once, but each sample's result is written and flushed
 before the next sample begins. This is the execution shape required by the
-30-second-per-sample competition limit. OpenRouter use in this script is for
-development only; final Docker inference must replace it with a local LLM.
+30-second-per-sample competition limit. The LLM is the local Qwen3.5-4B.
 
 Example:
     .venv/bin/python main/run_dev_pipeline.py --split public_test \
-        --id public_0002 --model z-ai/glm-5.3-flash \
+        --id public_0002 --model Qwen/Qwen3.5-4B \
         --output artifacts/public_0002_submission.jsonl
 """
 from __future__ import annotations
@@ -25,7 +24,6 @@ from typing import Any
 
 from agent import DEFAULT_MODEL, catalog_by_name, infer, read_jsonl
 from asr import PhoWhisperTranscriber
-from openrouter_test import load_project_env
 
 
 def add_transcripts(item: dict[str, Any], split_dir: Path, transcriber: PhoWhisperTranscriber) -> dict[str, Any]:
@@ -61,16 +59,11 @@ def main() -> None:
     parser.add_argument("--asr-model", default="vinai/PhoWhisper-large")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--adapter", type=Path, help="LoRA adapter dir for PhoWhisper")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="development OpenRouter model")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="local LLM (HF id)")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--asr-output", type=Path, help="write PhoWhisper transcripts alongside submission output")
     parser.add_argument("--resume", action="store_true", help="append and skip IDs already present in --output")
     args = parser.parse_args()
-
-    load_project_env()
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise SystemExit("OPENROUTER_API_KEY is missing. Put it in the gitignored .env file.")
 
     split_dir = args.root / args.split
     records = read_jsonl(split_dir / f"{args.split}.jsonl")
@@ -106,7 +99,6 @@ def main() -> None:
                         args.root,
                         args.split,
                         catalog,
-                        api_key,
                         args.model,
                     )
                 except Exception as error:  # one bad sample must not stop a full run
